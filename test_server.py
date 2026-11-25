@@ -79,6 +79,30 @@ class LogApi(unittest.TestCase):
                                  (401, {"error": "unauthorized"}))
         self.assertEqual(self.get(f"/v1/sources?token={key}", None)[0], 401)
 
+    def test_container_inventory_has_fixed_fields_and_does_not_grant_log_access(self):
+        cli = self.dir / "docker"
+        cli.write_text("""#!/bin/sh
+set -eu
+[ "$1,$2,$3,$4" = '--host,unix:///var/run/docker.sock,ps,--format' ]
+[ "$#" = 5 ] || [ "$6" = '--all' ]
+printf '%s\\n' '{"id":"abc","name":"outside","image":"app:1","state":"running","status":"Up","ports":"127.0.0.1:8100->8080/tcp"}'
+if [ "$#" = 6 ]; then
+  printf '%s\\n' '{"id":"def","name":"stopped","image":"app:1","state":"exited","status":"Exited","ports":""}'
+fi
+""")
+        cli.chmod(0o700)
+        with patch.dict(os.environ, PATH=f"{self.dir}:{os.environ['PATH']}"):
+            self.assertEqual(self.get("/v1/containers", None)[0], 401)
+            status, result = self.get("/v1/containers")
+            self.assertEqual((status, len(result["containers"])), (200, 1))
+            self.assertEqual(result["containers"][0]["ports"], "127.0.0.1:8100->8080/tcp")
+            self.assertEqual(self.get(f"/t/{TOKEN.decode()}/v1/containers?all=1", None)[1]["containers"][1]["state"], "exited")
+            self.assertEqual(self.get("/v1/containers?all=1&all=0")[0], 400)
+            self.assertEqual(self.get("/v1/containers?format=labels")[0], 400)
+            self.assertEqual(self.get("/v1/sources/outside/lines")[0], 404)
+            cli.write_text("#!/bin/sh\nprintf 'secret Docker error\\n' >&2\nexit 1\n")
+            self.assertEqual(self.get("/v1/containers"), (502, {"error": "source_unavailable"}))
+
     def test_file_rejects_symlinks_and_fifos(self):
         self.log.unlink()
         self.log.symlink_to("/etc/passwd")

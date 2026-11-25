@@ -21,6 +21,12 @@ BLOCK = 64 * 1024
 TIMEOUT = 12
 ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
 PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.~-]{32,256}")
+DOCKER = ("docker", "--host", "unix:///var/run/docker.sock")
+CONTAINER_FIELDS = ("id", "name", "image", "state", "status", "ports")
+CONTAINER_FORMAT = "{" + ",".join(
+    f'"{field}":{{{{json .{attr}}}}}'
+    for field, attr in zip(CONTAINER_FIELDS, ("ID", "Names", "Image", "State", "Status", "Ports"))
+) + "}"
 TIMESTAMP_RE = re.compile(rb"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z ")
 
 class ReadError(Exception):
@@ -136,11 +142,16 @@ def whole_lines(chunks, deadline):
 
 @contextlib.contextmanager
 def docker_chunks(name, mode, limit, deadline):
-    args = ["docker", "--host", "unix:///var/run/docker.sock", "logs", "--timestamps"]
+    args = ["logs", "--timestamps"]
     if mode == "tail":
         args.extend(("--tail", str(limit)))
     args.extend(("--", name))
-    with subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    with docker_output(args, deadline) as chunks:
+        yield chunks
+
+@contextlib.contextmanager
+def docker_output(args, deadline):
+    with subprocess.Popen([*DOCKER, *args], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT) as process:
         def read():
             with selectors.DefaultSelector() as selector:
@@ -165,6 +176,28 @@ def docker_chunks(name, mode, limit, deadline):
             if process.poll() is None:
                 with contextlib.suppress(ProcessLookupError):
                     process.kill()
+
+def list_containers(include_stopped):
+    args = ["ps", "--format", CONTAINER_FORMAT]
+    if include_stopped:
+        args.append("--all")
+    deadline = time.monotonic() + TIMEOUT
+    containers = []
+    size = 0
+    try:
+        with docker_output(args, deadline) as chunks:
+            for line in whole_lines(chunks, deadline):
+                size += len(line) + 1
+                if size > MAX_OUTPUT:
+                    raise distance_too_large()
+                row = json.loads(line)
+                if (not isinstance(row, dict) or set(row) != set(CONTAINER_FIELDS)
+                        or not all(isinstance(v, str) for v in row.values())):
+                    raise ValueError()
+                containers.append(row)
+    except (OSError, ValueError):
+        raise ReadError(502, "source_unavailable") from None
+    return containers
 
 def collect(rows, offset, limit, docker=False):
     result = []
@@ -282,6 +315,10 @@ class Handler(BaseHTTPRequestHandler):
                 allowed = len(headers) == 1 and hmac.compare_digest(headers[0].encode("latin-1"), expected)
             if not allowed:
                 return self.respond(401, {"error": "unauthorized"})
+            if path == "/v1/containers":
+                if uri.query not in {"", "all=0", "all=1"}:
+                    raise ValueError()
+                return self.respond(200, {"containers": list_containers(uri.query == "all=1")})
             if path == "/v1/sources" and not uri.query:
                 return self.respond(200, {"sources": [
                     {"id": sid, "kind": spec[0]} for sid, spec in self.server.sources.items()

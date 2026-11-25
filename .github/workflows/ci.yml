@@ -52,6 +52,13 @@ jobs:
           path_base="http://127.0.0.1:18085/t/$token/v1/sources"
           curl -fsS "$path_base" | jq -e '.sources | length == 2'
           curl -fsS "$path_base/file/lines?limit=1" | jq -e '.lines == ["a"]'
+          containers=http://127.0.0.1:18085/v1/containers
+          test "$(curl -sS -o /dev/null -w '%{http_code}' "$containers")" = 401
+          curl -fsS "${auth[@]}" "$containers" | jq -e '
+            (.containers | any(.name == "log-api-ci" and .state == "running" and (.ports | contains("127.0.0.1:18085->8080/tcp"))))
+            and (.containers | all(.name != "log-fixture-ci"))'
+          curl -fsS "http://127.0.0.1:18085/t/$token/v1/containers?all=1" |
+            jq -e '.containers | any(.name == "log-fixture-ci" and .state == "exited")'
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18085/t/01234567890123456789012345678901/v1/sources')" = 401
           curl -fsS "${auth[@]}" "$base/fixture/lines?limit=3" | jq -e '[.lines[] | split(" ")[1]] | sort == ["alpha","beta","gamma"]'
           curl -fsS "${auth[@]}" "$base/fixture/lines?mode=tail&limit=1" | jq -e '.lines | length == 1'
