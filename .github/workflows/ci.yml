@@ -22,7 +22,16 @@ jobs:
         run: |
           set -euo pipefail
           dir=$(mktemp -d)
-          trap 'docker rm -f log-api-ci log-fixture-ci >/dev/null 2>&1 || true; rm -rf "$dir"' EXIT
+          cleanup() {
+            result=$?
+            if (( result != 0 )); then
+              docker inspect --format 'API state {{.State.Status}}, exit {{.State.ExitCode}}' log-api-ci || true
+              docker logs log-api-ci || true
+            fi
+            docker rm -f log-api-ci log-fixture-ci >/dev/null 2>&1 || true; rm -rf "$dir"
+            exit "$result"
+          }
+          trap cleanup EXIT
           chmod 0755 "$dir"
           token=$(openssl rand -hex 32)
           echo "::add-mask::$token"
@@ -38,7 +47,7 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock -v "$dir:/config:ro" container-log-api:ci
           base=http://127.0.0.1:18085/v1/sources
           auth=(-H "Authorization: Bearer $token")
-          curl -fsS --retry 5 --retry-delay 1 --retry-connrefused "${auth[@]}" "$base" | jq -e '.sources | length == 2'
+          curl -fsS --retry 8 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 3 --retry-max-time 20 "${auth[@]}" "$base" | jq -e '.sources | length == 2'
           test "$(curl -sS -o /dev/null -w '%{http_code}' "$base")" = 401
           curl -fsS "${auth[@]}" "$base/fixture/lines?limit=3" | jq -e '[.lines[] | split(" ")[1]] | sort == ["alpha","beta","gamma"]'
           curl -fsS "${auth[@]}" "$base/fixture/lines?mode=tail&limit=1" | jq -e '.lines | length == 1'
