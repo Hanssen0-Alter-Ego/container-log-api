@@ -64,6 +64,21 @@ class LogApi(unittest.TestCase):
         self.log.write_bytes(b"")
         self.assertEqual(self.lines("file", "mode=tail")[1]["lines"], [])
 
+    def test_path_auth_for_listing_and_reading(self):
+        key = TOKEN.decode()
+        base = f"/t/{key}/v1/sources"
+        status, payload = self.get(base, None)
+        self.assertEqual(status, 200)
+        self.assertNotIn(key, json.dumps(payload))
+        status, payload = self.get(base + "/file/lines?mode=tail&limit=1", None)
+        self.assertEqual((status, payload["lines"]), (200, ["last"]))
+        self.assertEqual(self.get(base + "/unconfigured/lines", None)[0], 404)
+        for wrong in ("b"*64, key[:-1], "%61" + key[1:]):
+            with self.subTest(wrong=wrong):
+                self.assertEqual(self.get(f"/t/{wrong}/v1/sources"),
+                                 (401, {"error": "unauthorized"}))
+        self.assertEqual(self.get(f"/v1/sources?token={key}", None)[0], 401)
+
     def test_file_rejects_symlinks_and_fifos(self):
         self.log.unlink()
         self.log.symlink_to("/etc/passwd")

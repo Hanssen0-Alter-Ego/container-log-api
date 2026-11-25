@@ -20,6 +20,7 @@ MAX_OUTPUT = 2 * 1024 * 1024
 BLOCK = 64 * 1024
 TIMEOUT = 12
 ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}")
+PATH_TOKEN_RE = re.compile(r"[A-Za-z0-9_.~-]{32,256}")
 TIMESTAMP_RE = re.compile(rb"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?Z ")
 
 class ReadError(Exception):
@@ -263,21 +264,29 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(content)
 
     def do_GET(self):
-        headers = self.headers.get_all("Authorization", [])
-        expected = b"Bearer " + self.server.token
-        if len(headers) != 1 or not hmac.compare_digest(headers[0].encode("latin-1"), expected):
-            return self.respond(401, {"error": "unauthorized"})
         try:
             if len(self.path) > 1024:
                 raise ValueError()
             uri = urlsplit(self.path)
             if uri.scheme or uri.netloc or uri.fragment:
                 raise ValueError()
-            if uri.path == "/v1/sources" and not uri.query:
+            path = uri.path
+            if path.startswith("/t/"):
+                key, sep, rest = path[3:].partition("/")
+                allowed = bool(sep and PATH_TOKEN_RE.fullmatch(key)
+                               and hmac.compare_digest(key.encode("ascii"), self.server.token))
+                path = "/" + rest
+            else:
+                headers = self.headers.get_all("Authorization", [])
+                expected = b"Bearer " + self.server.token
+                allowed = len(headers) == 1 and hmac.compare_digest(headers[0].encode("latin-1"), expected)
+            if not allowed:
+                return self.respond(401, {"error": "unauthorized"})
+            if path == "/v1/sources" and not uri.query:
                 return self.respond(200, {"sources": [
                     {"id": sid, "kind": spec[0]} for sid, spec in self.server.sources.items()
                 ]})
-            match = re.fullmatch(r"/v1/sources/([a-zA-Z0-9_.-]+)/lines", uri.path)
+            match = re.fullmatch(r"/v1/sources/([a-zA-Z0-9_.-]+)/lines", path)
             if not match or match[1] not in self.server.sources:
                 return self.respond(404, {"error": "source_not_found"})
             mode, offset, limit = parameters(uri.query)

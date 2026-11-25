@@ -1,6 +1,6 @@
 # Container Log API
 
-Private-network, read-only HTTP access to an explicit list of Docker container logs and regular files. The API does **not** collect logs or enumerate Docker containers. It queries a source only when asked. A bearer token is required for every request.
+Private-network, read-only HTTP access to an explicit list of Docker container logs and regular files. The API does **not** collect logs or enumerate Docker containers. It queries a source only when asked. A token is required for every request.
 
 ## Deploy with Docker Compose
 
@@ -23,7 +23,12 @@ It listens on host loopback port 8085 by default. For remote access, use an auth
 
 ## HTTP API
 
-Only two GET endpoints are exposed. Everything requires `Authorization: Bearer <token>`.
+Only two GET endpoints are exposed. Prefer `Authorization: Bearer <token>` when the client can set it. For clients that cannot, prefix either endpoint with `/t/<token>`:
+
+- List: `GET /t/<token>/v1/sources`
+- Read: `GET /t/<token>/v1/sources/<id>/lines?mode=tail&limit=1000`
+
+The path token uses the same token file and must be URL-safe; the recommended 64-character hex token works unchanged. Query-string tokens are not accepted. This is a REST API, not an MCP server. The app does not log request URLs, but reverse proxies, tracing, browser history, and clients can record paths. Use HTTPS for remote access and disable or redact raw URL logging and tracing on this route. If an unredacted URL is captured or shared, rotate the token.
 
 ```sh
 # Put the bearer token in a private curl config file, not in shell history.

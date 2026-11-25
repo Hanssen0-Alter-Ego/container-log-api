@@ -49,6 +49,10 @@ jobs:
           auth=(-H "Authorization: Bearer $token")
           curl -fsS --retry 8 --retry-delay 1 --retry-all-errors --connect-timeout 2 --max-time 3 --retry-max-time 20 "${auth[@]}" "$base" | jq -e '.sources | length == 2'
           test "$(curl -sS -o /dev/null -w '%{http_code}' "$base")" = 401
+          path_base="http://127.0.0.1:18085/t/$token/v1/sources"
+          curl -fsS "$path_base" | jq -e '.sources | length == 2'
+          curl -fsS "$path_base/file/lines?limit=1" | jq -e '.lines == ["a"]'
+          test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18085/t/01234567890123456789012345678901/v1/sources')" = 401
           curl -fsS "${auth[@]}" "$base/fixture/lines?limit=3" | jq -e '[.lines[] | split(" ")[1]] | sort == ["alpha","beta","gamma"]'
           curl -fsS "${auth[@]}" "$base/fixture/lines?mode=tail&limit=1" | jq -e '.lines | length == 1'
           curl -fsS "${auth[@]}" "$base/file/lines?offset=1&limit=2" | jq -e '.lines == ["b","c"]'
