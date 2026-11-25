@@ -1,0 +1,7 @@
+{
+  "token_file": "/config/token",
+  "sources": [
+    {"id": "blockbook-mainnet", "kind": "docker", "container": "blockbook-mainnet-blockbook-1"},
+    {"id": "ckbadger-indexer", "kind": "file", "path": "/host-logs/mainnet-indexer.log"}
+  ]
+}

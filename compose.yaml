@@ -1,0 +1,17 @@
+services:
+  log-api:
+    image: ghcr.io/hanssen0-alter-ego/container-log-api:latest
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "${DOCKER_SOCKET_GID:?Set DOCKER_SOCKET_GID to the socket group ID}"
+    ports:
+      - "127.0.0.1:8085:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config:/config:ro
+      - ./host-logs:/host-logs:ro
