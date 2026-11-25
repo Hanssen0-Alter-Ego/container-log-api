@@ -148,6 +148,31 @@ fi
         self.assertTrue(missing["isError"])
         self.assertEqual(self.mcp("docker/exec")[1]["error"]["code"], -32601)
 
+    def test_observer_tools_and_journal_whitelist(self):
+        journal = self.dir / "journal-kernel.log"
+        journal.write_text("old event\nnew event\n")
+        self.sock.sources["kernel"] = ("journal", str(journal))
+        self.sock.host_snapshot_dir = str(self.dir)
+        (self.dir / "metrics.json").write_text('{"sampled_at":"today","cpu":{"busy_pct":42}}')
+        (self.dir / "filesystems.json").write_text(
+            '{"sampled_at":"today","mounts":[{"mount":"/"},{"mount":"/data"}],"truncated":false}')
+        tools = self.mcp("tools/list")[1]["result"]["tools"]
+        self.assertTrue({"get_host_metrics", "list_filesystems"} <= {t["name"] for t in tools})
+        def call(name, **args):
+            return self.mcp("tools/call", {"name": name, "arguments": args})[1]
+        self.assertEqual(call("get_host_metrics")["result"]["structuredContent"]["cpu"]["busy_pct"], 42)
+        self.assertEqual(call("list_filesystems", limit=1)["result"]["structuredContent"]["next_offset"], 1)
+        self.assertEqual(call("list_filesystems", offset=1, limit=1)["result"]["structuredContent"]["mounts"],
+                         [{"mount": "/data"}])
+        self.assertEqual(call("list_filesystems", offset=True)["error"]["code"], -32602)
+        self.assertEqual(call("read_logs", source_id="kernel", limit=1)["result"]["structuredContent"]["lines"],
+                         ["new event"])
+        self.assertEqual(call("read_logs", source_id="kernel", unit="sshd.service")["error"]["code"], -32602)
+        (self.dir / "metrics.json").unlink()
+        self.assertTrue(call("get_host_metrics")["result"]["isError"])
+        (self.dir / "metrics.json").symlink_to("/etc/passwd")
+        self.assertTrue(call("get_host_metrics")["result"]["isError"])
+
     def test_mcp_requires_auth_and_rejects_browser_origins_and_bad_versions(self):
         self.assertEqual(self.mcp("tools/list", token=None)[0], 401)
         self.assertEqual(self.mcp("tools/list", token=b"wrong")[0], 401)
@@ -195,7 +220,7 @@ fi
         conf = self.dir / "config.json"
         sources = [{"id": "example", "kind": "file", "path": str(self.log)}]
         conf.write_text(json.dumps({"token_file": str(token), "sources": sources}))
-        self.assertEqual(server.read_config(conf), (TOKEN, {"example": ("file", str(self.log))}))
+        self.assertEqual(server.read_config(conf), (TOKEN, {"example": ("file", str(self.log))}, None))
         for item in ({"id":"example","kind":"file","path":"/etc/../file"},
                      {"id":"example","kind":"docker","container":"--help"}, sources[0]):
             conf.write_text(json.dumps({"token_file": str(token), "sources": sources + [item]}))

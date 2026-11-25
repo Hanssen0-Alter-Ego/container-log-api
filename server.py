@@ -18,6 +18,7 @@ MAX_OFFSET = 1_000_000
 MAX_SCAN = 64 * 1024 * 1024
 MAX_OUTPUT = 2 * 1024 * 1024
 BLOCK = 64 * 1024
+MAX_SNAPSHOT = 512 * 1024
 TIMEOUT = 12
 MCP_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
 MCP_MAX_BODY = 16 * 1024
@@ -39,7 +40,7 @@ class ReadError(Exception):
 
 def read_config(path):
     config = json.loads(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(config, dict) or set(config) != {"token_file", "sources"}:
+    if not isinstance(config, dict) or not {"token_file", "sources"} <= set(config) <= {"token_file", "sources", "host_snapshot_dir"}:
         raise ValueError("expected token_file and sources")
     token = Path(config["token_file"]).read_bytes().strip()
     if not re.fullmatch(rb"[A-Za-z0-9_.~+/-]{32,256}={0,2}", token):
@@ -52,7 +53,7 @@ def read_config(path):
             raise ValueError("invalid source")
         source_id = item.get("id")
         kind = item.get("kind")
-        fields = {"docker": "container", "file": "path"}
+        fields = {"docker": "container", "file": "path", "journal": "path"}
         if (not isinstance(source_id, str) or not ID_RE.fullmatch(source_id)
                 or source_id in sources or not isinstance(kind, str) or kind not in fields):
             raise ValueError("invalid or duplicate source ID, or unknown kind")
@@ -62,12 +63,39 @@ def read_config(path):
             raise ValueError("invalid source fields")
         if kind == "docker" and not ID_RE.fullmatch(value):
             raise ValueError("invalid container name")
-        if kind == "file":
+        if kind in ("file", "journal"):
             p = PurePosixPath(value)
             if not p.is_absolute() or ".." in p.parts or len(p.parts) < 2:
                 raise ValueError("file source requires an absolute file path without '..'")
         sources[source_id] = (kind, value)
-    return token, sources
+    return token, sources, snapshot_dir(config)
+
+def read_snapshot(directory, name):
+    if directory is None:
+        raise ReadError(404, "host_observer_not_configured")
+    try:
+        with regular_file(str(PurePosixPath(directory) / (name + ".json"))) as (fd, size):
+            if size > MAX_SNAPSHOT:
+                raise distance_too_large()
+            value = json.loads(os.pread(fd, size + 1, 0))
+        if not isinstance(value, dict) or not isinstance(value.get("sampled_at"), str):
+            raise ValueError()
+        if name == "filesystems" and not isinstance(value.get("mounts"), list):
+            raise ValueError()
+        return value
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        raise ReadError(502, "host_snapshot_unavailable") from None
+
+def snapshot_dir(config):
+    if "host_snapshot_dir" not in config:
+        return None
+    directory = config["host_snapshot_dir"]
+    if not isinstance(directory, str):
+        raise ValueError()
+    p = PurePosixPath(directory)
+    if not p.is_absolute() or ".." in p.parts or len(p.parts) < 2:
+        raise ValueError()
+    return str(p)
 
 def parameters(query):
     settings = parse_qs(query, keep_blank_values=True, max_num_fields=3)
@@ -223,7 +251,7 @@ def read_source(source, mode, offset, limit):
     kind, value = source
     deadline = time.monotonic() + TIMEOUT
     try:
-        if kind == "file":
+        if kind in ("file", "journal"):
             with regular_file(value) as (fd, size):
                 if mode == "head":
                     return collect(whole_lines(file_chunks(fd, size, deadline), deadline), offset, limit)
@@ -265,6 +293,21 @@ MCP_TOOLS = [
       "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 40}}, ["source_id"]),
 ]
 
+HOST_MCP_TOOLS = [
+    ("get_host_metrics", "Read the latest host CPU, load, RAM and swap sample. Not container usage.", {}, []),
+    ("list_filesystems", "List a page of mounted host filesystem capacities, in bytes.", {
+        "offset": {"type": "integer", "minimum": 0, "default": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 64, "default": 32},
+    }, []),
+]
+
+def list_filesystems(directory, offset, limit):
+    snapshot = read_snapshot(directory, "filesystems")
+    rows = snapshot["mounts"]
+    return {"sampled_at": snapshot["sampled_at"], "mounts": rows[offset:offset + limit],
+            "total_mounts": len(rows), "truncated": snapshot.get("truncated", False),
+            "next_offset": offset + limit if offset + limit < len(rows) else None}
+
 def mcp_dispatch(method, params, server):
     if method == "initialize":
         version = params.get("protocolVersion")
@@ -283,7 +326,8 @@ def mcp_dispatch(method, params, server):
                              "additionalProperties": False},
              "annotations": {"readOnlyHint": True, "destructiveHint": False,
                              "idempotentHint": True, "openWorldHint": True}}
-            for name, description, properties, required in MCP_TOOLS
+            for name, description, properties, required in (MCP_TOOLS +
+                (HOST_MCP_TOOLS if server.host_snapshot_dir else []))
         ]}
     if method != "tools/call":
         raise LookupError()
@@ -299,6 +343,16 @@ def mcp_dispatch(method, params, server):
             if args:
                 raise ValueError()
             out = {"sources": describe_sources(server.sources)}
+        elif name == "get_host_metrics":
+            if args:
+                raise ValueError()
+            out = read_snapshot(server.host_snapshot_dir, "metrics")
+        elif name == "list_filesystems":
+            offset, limit = args.get("offset", 0), args.get("limit", 32)
+            if (set(args) - {"offset", "limit"} or type(offset) is not int or not 0 <= offset <= 512
+                    or type(limit) is not int or not 1 <= limit <= 64):
+                raise ValueError()
+            out = list_filesystems(server.host_snapshot_dir, offset, limit)
         elif name == "read_logs":
             if set(args) - {"source_id", "mode", "offset", "limit"}:
                 raise ValueError()
@@ -315,7 +369,7 @@ def mcp_dispatch(method, params, server):
                    "lines": read_source(server.sources[sid], mode, offset, limit)}
         else:
             raise ValueError()
-        encoded = json.dumps(out, ensure_ascii=False, separators=(",", ":"))
+        encoded = json.dumps(out, separators=(",", ":"))
         if len(encoded.encode("utf-8")) > MCP_MAX_RESULT:
             raise ReadError(413, "result_too_large_try_fewer_lines")
         return {"content": [{"type": "text", "text": encoded}], "structuredContent": out}
@@ -324,8 +378,8 @@ def mcp_dispatch(method, params, server):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
-    def __init__(self, address, token, sources):
-        self.token, self.sources = token, sources
+    def __init__(self, address, token, sources, host_snapshot_dir=None):
+        self.token, self.sources, self.host_snapshot_dir = token, sources, host_snapshot_dir
         self.slots = threading.BoundedSemaphore(16)
         super().__init__(address, Handler)
 
@@ -467,9 +521,10 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     try:
-        token, sources = read_config(os.environ.get("LOG_API_CONFIG", "/config/config.json"))
+        config_path = os.environ.get("LOG_API_CONFIG", "/config/config.json")
+        token, sources, host_snapshot_dir = read_config(config_path)
     except (OSError, KeyError, ValueError, TypeError):
         raise SystemExit("Cannot read valid log API configuration or token file.")
-    with Server(("0.0.0.0", 8080), token, sources) as server:
+    with Server(("0.0.0.0", 8080), token, sources, host_snapshot_dir) as server:
         print("Log API listening on port 8080.", flush=True)
         server.serve_forever()

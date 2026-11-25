@@ -83,3 +83,59 @@ tunnel-only configuration: the local upstream URL already authenticates to
 the app. Do not paste the upstream URL or either secret into ChatGPT, use a
 public reverse proxy, or enable raw URL logging on this route. Keep the
 tunnel process running for discovery and tool calls.
+
+### Optional: host CPU, RAM, mounted capacity and journal (Linux/systemd)
+
+The API container does not enter the host PID/mount namespaces and does not mount
+the host root or raw journal. A small host-side systemd timer publishes snapshots
+to a dedicated directory. Leave this section unconfigured to preserve the original
+tool list and behavior. This is on-demand inspection, not a time-series database
+or alert engine.
+
+On the **host**, from a checkout of this repository:
+
+```sh
+sudo install -d -m 0755 /usr/local/lib/container-log-api
+sudo install -d -o root -g 65532 -m 0750 /var/lib/container-log-observer
+sudo install -m 0644 host-observer/collect.py /usr/local/lib/container-log-api/
+sudo install -m 0644 host-observer/container-log-observer@.service host-observer/container-log-observer@.timer /etc/systemd/system/
+sudo install -D -m 0644 host-observer/journal-allowlist.conf \
+  /etc/systemd/system/container-log-observer@journal.service.d/allowlist.conf
+sudo systemctl daemon-reload
+sudo systemctl start container-log-observer@metrics.service container-log-observer@journal.service
+sudo systemctl enable --now container-log-observer@metrics.timer container-log-observer@journal.timer
+```
+
+The journal example exports only kernel messages and `docker.service`. Review
+your logs before enabling either source, especially if forwarding to a remote
+MCP client. To change the whitelist, edit the installed `allowlist.conf`, remove
+the unwanted sources from the API config, reload systemd, and restart the journal
+snapshot service. Old exports of removed sources can be deleted on the host.
+Never export sensitive units unless you intend to share that output with all
+users of this API token. No caller can supply journalctl flags or unit names.
+
+Merge the mount from `host-observer/compose.host-observer.yaml` into your Compose
+file under `services.log-api.volumes` (or include it as a second Compose file).
+In `config/config.json`, add the top-level field
+`"host_snapshot_dir": "/host-observer"` and append the desired entries to your
+existing `sources` array:
+
+```json
+[
+  {"id":"host-kernel","kind":"journal","path":"/host-observer/journal-kernel.log"},
+  {"id":"host-docker","kind":"journal","path":"/host-observer/journal-docker.service.log"}
+]
+```
+
+Recreate the API container with the new image and mount. The MCP tools
+`get_host_metrics` (one-second aggregate CPU sample, I/O wait, load, RAM and
+swap) and `list_filesystems` (root and storage mount points, including bind,
+network and read-only mounts where visible, excluding pseudo/container-overlay
+mounts) include `sampled_at`. Check its age before relying on a snapshot.
+Capacity is per mounted host filesystem, not per Docker named volume or
+unmounted disk; separate mount points can share the same backing capacity.
+`list_filesystems` uses `offset` and `limit`; follow `next_offset` if present.
+Journal exports hold up to 250 recent entries per configured source, as retained
+by the host journal. Use `list_log_sources` and `read_logs` as for file sources.
+This does not run journalctl on demand or search the host's entire backlog.
+If ChatGPT has cached the MCP tool list, refresh tools in the app after deployment.
