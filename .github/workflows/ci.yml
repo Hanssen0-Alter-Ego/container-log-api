@@ -59,6 +59,20 @@ jobs:
             and (.containers | all(.name != "log-fixture-ci"))'
           curl -fsS "http://127.0.0.1:18085/t/$token/v1/containers?all=1" |
             jq -e '.containers | any(.name == "log-fixture-ci" and .state == "exited")'
+          mcp="http://127.0.0.1:18085/t/$token/mcp"
+          rpc() {
+            curl -fsS -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+              --data-binary "$1" "$mcp"
+          }
+          rpc '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' |
+            jq -e '.result.protocolVersion == "2025-11-25"'
+          rpc '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+          rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
+            jq -e '[.result.tools[] | select(.annotations.readOnlyHint) | .name] | sort == ["list_containers","list_log_sources","read_logs"]'
+          rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_containers","arguments":{"all":true}}}' |
+            jq -e '.result.structuredContent.containers | any(.name == "log-fixture-ci" and .state == "exited")'
+          rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_logs","arguments":{"source_id":"file","limit":1}}}' |
+            jq -e '.result.structuredContent.lines == ["c"]'
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18085/t/01234567890123456789012345678901/v1/sources')" = 401
           curl -fsS "${auth[@]}" "$base/fixture/lines?limit=3" | jq -e '[.lines[] | split(" ")[1]] | sort == ["alpha","beta","gamma"]'
           curl -fsS "${auth[@]}" "$base/fixture/lines?mode=tail&limit=1" | jq -e '.lines | length == 1'

@@ -51,3 +51,35 @@ The private curl config is a mode-0600 file with a line of the form `header = "A
 ## Test
 
 `python3 -m unittest -v` exercises both source types through real HTTP using a fixture for the Docker CLI. GitHub Actions builds the image and tests reading logs with a real Docker daemon before publishing the tested image.
+
+## Read-only MCP
+
+The same image serves stateless Streamable HTTP at `/mcp` (Bearer header) or
+`/t/<token>/mcp` (URL-safe local path token). It exposes only
+`list_containers`, `list_log_sources` and `read_logs`. Tool discovery requires
+authentication. `read_logs` accepts configured IDs only and at most 200 lines
+per call (default 40); ask for fewer lines if the response is too large. Treat
+log contents as untrusted data. The existing REST endpoints are unchanged.
+
+For a private ChatGPT connection, keep Compose on `127.0.0.1:8085` and run
+OpenAI's [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+on the same host. Create the tunnel, associate the intended ChatGPT workspace,
+and use a runtime key, not an admin key. With the official
+[`tunnel-client`](https://github.com/openai/tunnel-client/releases/latest)
+installed, run from the Compose directory in Bash:
+
+```bash
+export CONTROL_PLANE_TUNNEL_ID='<your tunnel ID>'
+read -rsp 'Tunnel runtime key: ' CONTROL_PLANE_API_KEY; echo
+export CONTROL_PLANE_API_KEY
+export MCP_SERVER_URL="http://127.0.0.1:8085/t/$(sudo cat config/token)/mcp"
+tunnel-client doctor --explain
+tunnel-client run
+```
+
+In ChatGPT, select **Plugins → Add custom MCP server → Tunnel**, select that
+tunnel, and install the private plugin. Select **No authentication** for this
+tunnel-only configuration: the local upstream URL already authenticates to
+the app. Do not paste the upstream URL or either secret into ChatGPT, use a
+public reverse proxy, or enable raw URL logging on this route. Keep the
+tunnel process running for discovery and tool calls.

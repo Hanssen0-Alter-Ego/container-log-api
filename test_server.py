@@ -103,6 +103,59 @@ fi
             cli.write_text("#!/bin/sh\nprintf 'secret Docker error\\n' >&2\nexit 1\n")
             self.assertEqual(self.get("/v1/containers"), (502, {"error": "source_unavailable"}))
 
+    def mcp(self, method, params=None, *, token=TOKEN, use_path=False, headers=None, notify=False):
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   **(headers or {})}
+        path = f"/t/{TOKEN.decode()}/mcp" if use_path else "/mcp"
+        if token is not None and not use_path:
+            headers["Authorization"] = "Bearer " + token.decode()
+        message = {"jsonrpc": "2.0", "method": method}
+        if not notify:
+            message["id"] = 7
+        if params is not None:
+            message["params"] = params
+        conn = http.client.HTTPConnection(*self.sock.server_address, timeout=3)
+        try:
+            conn.request("POST", path, body=json.dumps(message), headers=headers)
+            res = conn.getresponse()
+            data = res.read()
+            return res.status, json.loads(data) if data else None
+        finally:
+            conn.close()
+
+    def test_mcp_handshake_discovery_and_read_only_tools(self):
+        status, init = self.mcp("initialize", {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"},
+        })
+        self.assertEqual((status, init["id"], init["result"]["protocolVersion"]), (200, 7, "2025-06-18"))
+        self.assertEqual(self.mcp("notifications/initialized", use_path=True, notify=True), (202, None))
+        tools = self.mcp("tools/list", use_path=True)[1]["result"]["tools"]
+        self.assertEqual({t["name"] for t in tools}, {"list_containers", "list_log_sources", "read_logs"})
+        self.assertTrue(all(t["annotations"]["readOnlyHint"] for t in tools))
+        sources = self.mcp("tools/call", {"name": "list_log_sources"}, use_path=True)[1]["result"]["structuredContent"]
+        self.assertEqual(sources["sources"][0], {"id": "file", "kind": "file"})
+        with patch.object(server, "list_containers", return_value=[]) as inventory:
+            self.mcp("tools/call", {"name": "list_containers", "arguments": {"all": True}}, use_path=True)
+            inventory.assert_called_once_with(True)
+        data = self.mcp("tools/call", {
+            "name": "read_logs", "arguments": {"source_id": "file", "mode": "tail", "limit": 1},
+        }, use_path=True)[1]["result"]["structuredContent"]
+        self.assertEqual(data["lines"], ["last"])
+        for args in ({"source_id": "/etc/passwd"}, {"source_id": "file", "limit": True},
+                     {"source_id": "file", "path": "/etc/passwd"}, {"source_id": "file", "offset": 1}):
+            self.assertEqual(self.mcp("tools/call", {"name": "read_logs", "arguments": args})[1]["error"]["code"], -32602)
+        missing = self.mcp("tools/call", {"name": "read_logs", "arguments": {"source_id": "missing"}})[1]["result"]
+        self.assertTrue(missing["isError"])
+        self.assertEqual(self.mcp("docker/exec")[1]["error"]["code"], -32601)
+
+    def test_mcp_requires_auth_and_rejects_browser_origins_and_bad_versions(self):
+        self.assertEqual(self.mcp("tools/list", token=None)[0], 401)
+        self.assertEqual(self.mcp("tools/list", token=b"wrong")[0], 401)
+        self.assertEqual(self.mcp("tools/list", use_path=True, headers={"Origin": "https://untrusted.invalid"})[0], 403)
+        self.assertEqual(self.mcp("tools/list", headers={"MCP-Protocol-Version": "1990-01-01"})[0], 400)
+        self.assertEqual(self.get("/mcp")[0], 405)
+        self.assertEqual(self.get("/mcp", None)[0], 401)
+
     def test_file_rejects_symlinks_and_fifos(self):
         self.log.unlink()
         self.log.symlink_to("/etc/passwd")
