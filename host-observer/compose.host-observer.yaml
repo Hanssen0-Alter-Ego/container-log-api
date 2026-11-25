@@ -1,4 +1,0 @@
-services:
-  log-api:
-    volumes:
-      - /var/lib/container-log-observer:/host-observer:ro

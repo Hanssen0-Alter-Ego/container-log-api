@@ -38,10 +38,9 @@ jobs:
           printf '%s\n' "$token" > "$dir/token"
           printf 'a\nb\nc\n' > "$dir/test.log"
           cat > "$dir/config.json" <<'EOF'
-          {"token_file":"/config/token","host_snapshot_dir":"/config","sources":[{"id":"fixture","kind":"docker","container":"log-fixture-ci"},{"id":"file","kind":"file","path":"/config/test.log"}]}
+          {"token_file":"/config/token","sources":[{"id":"fixture","kind":"docker","container":"log-fixture-ci"},{"id":"file","kind":"file","path":"/config/test.log"}]}
           EOF
-          python3 host-observer/collect.py --output "$dir" metrics
-          chmod 0444 "$dir"/{config.json,token,test.log,metrics.json,filesystems.json}
+          chmod 0444 "$dir"/{config.json,token,test.log}
           docker run --name log-fixture-ci alpine:3.22 sh -c 'echo alpha; echo beta >&2; echo gamma'
           docker run -d --name log-api-ci --read-only --cap-drop ALL --security-opt no-new-privileges \
             --group-add "$(stat -c %g /var/run/docker.sock)" -p 127.0.0.1:18085:8080 \
@@ -69,13 +68,11 @@ jobs:
             jq -e '.result.protocolVersion == "2025-11-25"'
           rpc '{"jsonrpc":"2.0","method":"notifications/initialized"}'
           rpc '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
-            jq -e '[.result.tools[] | select(.annotations.readOnlyHint) | .name] | sort == ["get_host_metrics","list_containers","list_filesystems","list_log_sources","read_logs"]'
+            jq -e '[.result.tools[] | select(.annotations.readOnlyHint) | .name] | sort == ["get_system_metrics","list_containers","list_log_sources","read_logs"]'
           rpc '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_containers","arguments":{"all":true}}}' |
             jq -e '.result.structuredContent.containers | any(.name == "log-fixture-ci" and .state == "exited")'
-          rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_host_metrics"}}' |
-            jq -e '.result.structuredContent | .memory.total_bytes > 0 and .cpu.logical_cpus > 0'
-          rpc '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"list_filesystems","arguments":{"limit":1}}}' |
-            jq -e '.result.structuredContent.mounts | length == 1'
+          rpc '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_system_metrics"}}' |
+            jq -e '.result.structuredContent | .scope == "procfs_visible_to_container" and .memory.total_bytes > 0 and .swap.total_bytes >= 0'
           rpc '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_logs","arguments":{"source_id":"file","limit":1}}}' |
             jq -e '.result.structuredContent.lines == ["c"]'
           test "$(curl -sS -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18085/t/01234567890123456789012345678901/v1/sources')" = 401
